@@ -23,8 +23,9 @@ export class GameWindow {
         this.enemies.forEach((enemy) => {
             enemy.Update();
         });
-        if (this.enemies[0].CheckMovementSwap()
-            || this.enemies[this.enemies.length - 1].CheckMovementSwap()) {
+        if (this.enemies.length > 0
+            && (this.enemies[0].CheckMovementSwap()
+                || this.enemies[this.enemies.length - 1].CheckMovementSwap())) {
             this.enemies.forEach((enemy) => {
                 enemy.SwapMovement();
             });
@@ -46,10 +47,28 @@ export class GameWindow {
         for (let i = bulletsToRemove.length - 1; i >= 0; i--) {
             this.bullets.splice(bulletsToRemove[i], 1);
         }
+        //check for collisions before player fires to reduce load
+        //as there can be no collisions from player bullets on first frame
+        bulletsToRemove = new Array;
+        for (let i = 0; i < this.bullets.length; i++) {
+            if (this.bullets[i].CheckCollision(this.player)) {
+                bulletsToRemove.push(i);
+                this.player.TakeDamage();
+            }
+            this.enemies.forEach((enemy) => {
+                if (this.bullets[i].CheckCollision(enemy)) {
+                    bulletsToRemove.push(i);
+                    enemy.TakeDamage();
+                }
+            });
+        }
+        for (let i = bulletsToRemove.length - 1; i >= 0; i--) {
+            this.bullets.splice(bulletsToRemove[i], 1);
+        }
         if (this.player.Firing()) {
             this.bullets.push(this.player.FireBullet());
         }
-        //check for collisions
+        //calculate frames for when enemies fire
         return transferBullets;
     }
     UpdateFromInput(aInput) {
@@ -66,6 +85,9 @@ export class GameWindow {
         return true;
         //need to check if new player status is same as before
         //if so do nothing, otherwise, need to call update chain?
+    }
+    RemoveAllEnemies() {
+        this.enemies.splice(0, this.enemies.length);
     }
     Draw(aCtx) {
         this.player.Draw(aCtx);
@@ -132,6 +154,10 @@ export class GameState {
         nextGameState.Update();
         return nextGameState;
     }
+    RemoveAllEnemies() {
+        this.homeWindow.RemoveAllEnemies();
+        this.awayWindow.RemoveAllEnemies();
+    }
     Draw(aCtx) {
         let aCanvas = document.getElementById("canvas");
         aCtx.translate(0, (aCanvas.height / 2));
@@ -153,11 +179,25 @@ export class GameEngine {
         this.frameAdvantageLimit = 99;
         this.gameStates = new Array();
         this.gameStates.push(new GameState(this.initialFrame));
+        this.mode = "wait";
+        this.waitMessage = "Choose Mode";
     }
     Begin() {
         this.dataBuffer.Connect();
     }
-    Reset() {
+    SinglePlayer() {
+        return this.mode == "sp";
+    }
+    MultiPlayer() {
+        return this.mode == "mp";
+    }
+    WaitMode() {
+        return this.mode == "wait";
+    }
+    WaitMessage() {
+        return this.waitMessage;
+    }
+    Reset(aMode) {
         this.initialFrame = 0;
         this.localFrame = this.initialFrame;
         this.remoteFrame = this.initialFrame;
@@ -166,6 +206,14 @@ export class GameEngine {
         this.frameAdvantageLimit = 99;
         this.gameStates = new Array();
         this.gameStates.push(new GameState(this.initialFrame));
+        this.mode = aMode;
+        if (this.MultiPlayer()) {
+            this.Begin();
+            if (!this.dataBuffer.ConnectionEstablished()) {
+                this.mode = "wait";
+                this.waitMessage = "Connection Error";
+            }
+        }
     }
     TimeSynched() {
         if (this.dataBuffer.ConnectionEstablished()) {
@@ -247,18 +295,44 @@ export class GameEngine {
         }
     }
     Update(keys) {
-        //processes and network data and determines sync frame
-        this.UpdateFromNetwork();
-        //Rollback Condition
-        if (this.localFrame > this.syncFrame && this.remoteFrame > this.syncFrame) {
-            this.ExecuteRollback(this.syncFrame);
+        if (this.MultiPlayer()) {
+            //processes and network data and determines sync frame
+            this.UpdateFromNetwork();
+            //Rollback Condition
+            if (this.localFrame > this.syncFrame && this.remoteFrame > this.syncFrame) {
+                this.ExecuteRollback(this.syncFrame);
+            }
+            if (this.TimeSynched()) {
+                this.localFrame++;
+                let aDataTransfer = new DataTransfer(this.localFrame, keys);
+                this.dataBuffer.Send(aDataTransfer);
+                this.gameStates.push(this.gameStates[this.gameStates.length - 1].UseInputAndGenerateNextFrame(keys));
+            }
         }
-        if (this.TimeSynched()) {
+        if (this.SinglePlayer()) {
             this.localFrame++;
-            let aDataTransfer = new DataTransfer(this.localFrame, keys);
-            this.dataBuffer.Send(aDataTransfer);
-            this.gameStates.push(this.gameStates[this.gameStates.length - 1].UseInputAndGenerateNextFrame(keys));
+            let aPlayer = new Player(0, 0);
+            aPlayer.ProcessInput(keys);
+            let lastIndex = this.gameStates.length - 1;
+            this.gameStates[lastIndex].SetHomePlayerBehavior(aPlayer);
+            this.gameStates[lastIndex].SetAwayPlayerBehavior(aPlayer);
+            this.gameStates.push(this.gameStates[lastIndex].NextFrame());
         }
+        if (this.WaitMode()) {
+            if (this.localFrame == 0) {
+                this.RemoveAllEnemies();
+            }
+            this.localFrame++;
+            let aPlayer = new Player(0, 0);
+            aPlayer.ProcessInput(keys);
+            let lastIndex = this.gameStates.length - 1;
+            this.gameStates[lastIndex].SetHomePlayerBehavior(aPlayer);
+            this.gameStates.push(this.gameStates[lastIndex].NextFrame());
+        }
+    }
+    RemoveAllEnemies() {
+        let lastIndex = this.gameStates.length - 1;
+        this.gameStates[lastIndex].RemoveAllEnemies();
     }
     Draw(aCtx) {
         this.gameStates[this.gameStates.length - 1].Draw(aCtx);
